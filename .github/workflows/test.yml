@@ -1,0 +1,78 @@
+name: Test
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: Path to the package's main module
+        type: string
+        required: false
+        default: package/main.roc
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v14
+
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          # Keep the saved store under GitHub's 10 GB/repo cache budget.
+          gc-max-store-size-linux: 5G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
+
+      - name: Build Roc from the flake
+        run: nix build .#roc
+
+      - name: Check
+        run: ./result/bin/roc check "${{ inputs.package }}"
+
+      - name: Test
+        run: |
+          set +e
+          ./result/bin/roc test "${{ inputs.package }}"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error::roc test failed with exit code ${status}. If it printed no output, check that every dependency in ${{ inputs.package }} is a URL — path dependencies currently make roc test fail silently."
+            exit "$status"
+          fi
+
+      # `roc bundle` can exit 0 while producing a tarball that is missing the
+      # package's modules (seen with path dependencies), so bundling alone
+      # proves nothing: assert that every module made it into the tarball.
+      - name: Bundle sanity check
+        run: |
+          pkg_dir=$(dirname "${{ inputs.package }}")
+          main=$(basename "${{ inputs.package }}")
+          out="$RUNNER_TEMP/bundle-check"
+          mkdir -p "$out"
+          (cd "$pkg_dir" && "$GITHUB_WORKSPACE/result/bin/roc" bundle --output-dir "$out" "$main")
+          tarball=$(find "$out" -name '*.tar.zst' | head -n 1)
+          if [ -z "$tarball" ]; then
+            echo "::error::roc bundle produced no tarball"
+            exit 1
+          fi
+          tar -tf "$tarball" > "$RUNNER_TEMP/bundle-contents.txt"
+          echo "Bundle contents:"
+          cat "$RUNNER_TEMP/bundle-contents.txt"
+          missing=0
+          for f in "$pkg_dir"/*.roc; do
+            name=$(basename "$f")
+            if ! grep -qx "$name" "$RUNNER_TEMP/bundle-contents.txt"; then
+              echo "::error::Bundle is missing ${name}"
+              missing=1
+            fi
+          done
+          exit "$missing"
