@@ -76,3 +76,18 @@ jobs:
             fi
           done
           exit "$missing"
+
+      # The steps above run the project's own `expect` blocks, and this next
+      # steps runs the project's `./tests.roc` script if it exists. That script
+      # can contain whatever tests the project needs.
+      - name: Project test script
+        run: |
+          if [ -x ./tests.roc ]; then
+            nix develop -c ./tests.roc
+          elif [ -f ./tests.roc ]; then
+            # Silently skipping would look identical to passing, so be loud.
+            echo "::error::./tests.roc exists but is not executable. Run: chmod +x tests.roc"
+            exit 1
+          else
+            echo "No ./tests.roc in this repository, nothing to run."
+          fi
