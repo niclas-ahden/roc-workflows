@@ -1,0 +1,124 @@
+name: Deploy docs
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: Path to the package's main module
+        type: string
+        required: false
+        default: package/main.roc
+      landing-page:
+        description: Path to the landing page template, which must contain LATESTVERSION where the newest version goes
+        type: string
+        required: false
+        default: docs/index.html
+
+jobs:
+  deploy:
+    name: Deploy docs
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v14
+
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          # Keep the saved store under GitHub's 10 GB/repo cache budget.
+          gc-max-store-size-linux: 5G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
+
+      - name: Build Roc from the flake
+        run: nix build .#roc
+
+      # A release's docs.tar.gz never changes once uploaded, so the cache below
+      # can skip every download while the set of assets is unchanged. The key
+      # is built from the asset ids rather than the release tags: a tag exists
+      # from the moment the release is published, but its docs are uploaded by
+      # the Bundle workflow ~15 minutes later, so a run in between would
+      # otherwise save a docs set that is missing that release under the key
+      # every later run reads.
+      - name: List the docs of every release
+        id: releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" > releases.json
+          jq -r '.[] | .tag_name as $tag | .assets[] | select(.name == "docs.tar.gz") | "\($tag)\t\(.id)\t\(.browser_download_url)"' \
+            releases.json | sort > release-docs.tsv
+          jq -r '.[] | select(all(.assets[]; .name != "docs.tar.gz")) | "No docs.tar.gz on release \(.tag_name), leaving it out of the site"' releases.json
+          echo "Releases with docs: $(wc -l < release-docs.tsv)"
+          echo "key=$(sha256sum release-docs.tsv | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the docs of every release
+        id: release-docs-cache
+        uses: actions/cache@v4
+        with:
+          path: ./release_docs
+          key: release-docs-v2-${{ steps.releases.outputs.key }}
+
+      - name: Download the docs of every release
+        if: steps.release-docs-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ./release_docs
+          while IFS=$'\t' read -r tag asset_id url; do
+            [ -n "${tag}" ] || continue
+            echo "Fetching the docs of ${tag} (asset ${asset_id})"
+            mkdir -p "./release_docs/${tag}"
+            curl -sSfL -H "Authorization: token ${GH_TOKEN}" "${url}" -o "${RUNNER_TEMP}/docs.tar.gz"
+            tar -xzf "${RUNNER_TEMP}/docs.tar.gz" -C "./release_docs/${tag}" --strip-components=1
+            rm "${RUNNER_TEMP}/docs.tar.gz"
+          done < release-docs.tsv
+
+      - name: Assemble the docs site
+        run: |
+          mkdir -p ./temp_docs
+          cp -r ./release_docs/. ./temp_docs/ 2>/dev/null || true
+
+          # The landing page redirects to the newest release that has docs,
+          # falling back to the main-branch docs when none do.
+          latest_release=$(jq -r '.[0].tag_name // empty' releases.json)
+          if [ -n "${latest_release}" ] && [ -d "./temp_docs/${latest_release}" ]; then
+            redirect="${latest_release}"
+          else
+            redirect="main"
+          fi
+          if [ ! -f "${{ inputs.landing-page }}" ]; then
+            echo "::error::${{ inputs.landing-page }} not found"
+            exit 1
+          fi
+          sed "s/LATESTVERSION/${redirect}/g" "${{ inputs.landing-page }}" > ./temp_docs/index.html
+          echo "Landing page redirects to ${redirect}"
+
+      - name: Add docs for the main branch
+        run: |
+          export ROC_DOCS_URL_ROOT="/${GITHUB_REPOSITORY#*/}/main"
+          ./result/bin/roc docs "${{ inputs.package }}"
+          mkdir -p ./temp_docs/main
+          mv ./generated-docs/* ./temp_docs/main
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "./temp_docs"
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
