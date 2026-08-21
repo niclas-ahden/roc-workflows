@@ -33,7 +33,35 @@ on:
 jobs:
   test:
     uses: niclas-ahden/roc-workflows/.github/workflows/test.yml@v2
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 ```
+
+### Filling the binary cache
+
+Every run reads niclas-ahden.cachix.org, so the pinned compiler is a download
+rather than half an hour of compiling. Something has to put it there, and a dev
+machine cannot: the cache needs an `x86_64-linux` build and Nix does not
+cross-compile to it from a Mac. So CI does it.
+
+Set a `CACHIX_AUTH_TOKEN` repository secret with write access to the cache and
+pass it as above. A run then pushes the compiler and the devShell only when all
+of these hold:
+
+- the secret reached the workflow
+- the event is a `push` or a `workflow_dispatch`
+- the ref is the repo's default branch
+
+A pull request therefore never writes, and one from a fork is handed no secret
+at all. The step says which of the three failed, so a run that unexpectedly
+only reads is one log line to diagnose.
+
+Leaving the secret out is supported and costs nothing extra: the repo keeps
+reading the cache, and whichever repo does hold the token fills it, since the
+compiler derivation is the same everywhere the same `roc-src` is pinned. After
+a pin bump, the first run to build is the slow one; merge it to the default
+branch and the rest are fast. `workflow_dispatch` re-pushes without a commit,
+for when the cache has been pruned.
 
 ## bundle.yml
 

@@ -8,6 +8,9 @@ on:
         type: string
         required: false
         default: package/main.roc
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: false
 
 jobs:
   test:
@@ -20,9 +23,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v14
         with:
-          # niclas-ahden.cachix.org serves the Roc compiler this flake pins,
-          # pushed there from a dev machine, so no runner builds it from
-          # source.
           extra-conf: |
             extra-substituters = https://niclas-ahden.cachix.org
             extra-trusted-public-keys = niclas-ahden.cachix.org-1:FdGli1vBk0cTuVJV27Tau/JvlbW+Ly3pRwFByyqdke0=
@@ -40,6 +40,40 @@ jobs:
           purge-created: 0
           purge-primary-key: never
 
+      # Writing to the cache is for the default branch only. A pull request
+      # from a fork is handed no secret at all, and even one from a branch of
+      # this repo should not publish store paths that nothing has merged yet.
+      - name: Decide whether this run may write to the cache
+        id: cache-write
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            reason="the caller passed no CACHIX_AUTH_TOKEN"
+          elif [ "$GITHUB_EVENT_NAME" != push ] && [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
+            reason="this is a $GITHUB_EVENT_NAME, not a push"
+          elif [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            reason="$GITHUB_REF_NAME is not the default branch"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+            echo "This run pushes what it builds to niclas-ahden.cachix.org."
+            exit 0
+          fi
+          echo "push=false" >> "$GITHUB_OUTPUT"
+          echo "This run only reads the binary cache: $reason."
+
+      # Puts `cachix` on PATH, authenticated, and installs a post-build-hook
+      # that pushes each path as it is built. The explicit push further down
+      # is still needed: on a store-cache hit nothing is built, so the hook
+      # sees nothing, yet the path may still be missing from Cachix.
+      - name: Authenticate with Cachix
+        if: steps.cache-write.outputs.push == 'true'
+        uses: cachix/cachix-action@v15
+        with:
+          name: niclas-ahden
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
       # --max-jobs 0 forbids local builds, so a compiler that is missing from
       # the binary cache is reported here instead of quietly costing the run
       # half an hour. The plain build after it is the fallback that keeps a
@@ -47,9 +81,24 @@ jobs:
       - name: Build Roc from the flake
         run: |
           nix build .#roc --max-jobs 0 || {
-            echo "::warning::The pinned Roc compiler is not in the binary cache, so this run builds it from source. Push it from a machine that has it: nix build .#roc --no-link --print-out-paths | cachix push niclas-ahden"
+            echo "::warning::The pinned Roc compiler is not in the binary cache, so this run builds it from source. A push to the default branch of a repo holding the CACHIX_AUTH_TOKEN secret fills the cache; until one lands, every run pays this."
             nix build .#roc
           }
+
+      # Before the test steps, not after: a suite that goes red does not make
+      # the half hour of compiling worth repeating on the next run.
+      #
+      # The devShell goes too. It is what `./tests.roc` runs under below, and
+      # what a contributor gets from `nix develop`, so leaving it out would
+      # mean a cache that spares you the compiler and then builds playwright
+      # and friends anyway. Realize it here even in a repo with no tests.roc,
+      # so the pushed set does not depend on which steps happen to run.
+      - name: Push the compiler and devShell to the binary cache
+        if: steps.cache-write.outputs.push == 'true'
+        run: |
+          cachix push niclas-ahden ./result
+          nix develop --profile "$RUNNER_TEMP/devshell" --command true
+          cachix push niclas-ahden "$RUNNER_TEMP/devshell"
 
       - name: Check
         run: ./result/bin/roc check "${{ inputs.package }}"
