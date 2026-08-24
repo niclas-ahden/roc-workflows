@@ -74,7 +74,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" > releases.json
+          # Drafts are dropped here, before anything reads releases.json. A
+          # drafted release already carries its docs.tar.gz, and nothing
+          # unpublished may reach the site or become the redirect target.
+          # Slurping the paginated pages into one array at the same time keeps
+          # .[0] meaning "the newest release" past 30 releases.
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            | jq -s '[.[][] | select(.draft | not)]' > releases.json
           jq -r '.[] | .tag_name as $tag | .assets[] | select(.name == "docs.tar.gz") | "\($tag)\t\(.id)\t\(.browser_download_url)"' \
             releases.json | sort > release-docs.tsv
           jq -r '.[] | select(all(.assets[]; .name != "docs.tar.gz")) | "No docs.tar.gz on release \(.tag_name), leaving it out of the site"' releases.json

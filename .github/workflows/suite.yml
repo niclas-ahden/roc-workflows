@@ -1,0 +1,228 @@
+name: Suite
+
+# The per-operating-system test matrix for a Roc package, written once and
+# called by every workflow that needs one.
+#
+# This takes the no-Nix route (a Roc nightly downloaded from a release) because
+# Nix has no Windows support, and because a downloaded nightly is the compiler
+# a user of the package actually has. A caller picks the compiler and what to
+# test: this checkout's package, a published bundle, or a bundle that is still
+# a draft.
+#
+# A red leg reddens the call, so `needs.<job>.result` is the truth about it.
+# Callers that want a leg to be informational put it in a call of its own and
+# simply don't gate on that call.
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        description: Prefix for the job names, so a caller's legs are tellable apart.
+        type: string
+        required: true
+      roc:
+        description: A Roc nightly tag, such as `nightly-2026-08-23-fb208ba`.
+        type: string
+        required: true
+      opts:
+        description: >
+          JSON array of roc optimization levels (dev, speed, size,
+          interpreter), crossed with `os`. Everything is built with it.
+        type: string
+        default: '["speed"]'
+      os:
+        description: JSON array of runner labels, crossed with `opts`.
+        type: string
+        default: '["ubuntu-24.04", "macos-15", "windows-2025"]'
+      ref:
+        description: Ref to check out. Defaults to whatever triggered the caller.
+        type: string
+        default: ''
+      package:
+        description: Path to the package's main module.
+        type: string
+        default: package/main.roc
+      examples:
+        description: >
+          Space separated directories whose top level *.roc files are apps to
+          run. They have to run to completion on their own, with no arguments.
+          Missing directories are skipped.
+        type: string
+        default: examples
+      consumers:
+        description: >
+          Space separated directories holding apps that depend on the package,
+          rewritten to point at the bundle when one is given. Missing
+          directories are skipped.
+        type: string
+        default: examples tests
+      bundle-url:
+        description: >
+          Point every app at this published bundle instead of at this
+          checkout's package, so the run tests the released artifact.
+        type: string
+        default: ''
+      bundle-artifact:
+        description: >
+          Workflow artifact holding one *.tar.zst bundle. Each leg serves it on
+          127.0.0.1 and points every app there. roc allows http to localhost,
+          so it does the download, hash check and unbundle itself. This is for
+          a drafted bundle, whose release asset needs a token. Exclusive with
+          `bundle-url`.
+        type: string
+        default: ''
+      setup:
+        description: >
+          Script in the calling repository, run after Roc is installed and
+          before anything is checked. For whatever else a package needs
+          present, such as a browser or a database.
+        type: string
+        default: ''
+      teardown:
+        description: Script in the calling repository, run after the checks pass.
+        type: string
+        default: ''
+      node:
+        description: >
+          Set up Node. Already implied by `bundle-artifact`, which is served
+          over Node.
+        type: boolean
+        default: false
+
+env:
+  # Where these workflows find their own scripts. A reusable workflow cannot
+  # see the ref it was called at, so this names it by hand: keep it equal to
+  # the tag this file is released under.
+  TOOLING_REF: v3
+
+jobs:
+  suite:
+    name: ${{ inputs.label }} (${{ matrix.opt }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One red leg must never hide another's result.
+      fail-fast: false
+      matrix:
+        opt: ${{ fromJSON(inputs.opts) }}
+        os: ${{ fromJSON(inputs.os) }}
+    steps:
+      # The code under test.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Tooling from this workflow's own version rather than from the code
+      # under test, so an old release tag, which predates these scripts, is
+      # still testable.
+      - uses: actions/checkout@v4
+        with:
+          repository: niclas-ahden/roc-workflows
+          ref: ${{ env.TOOLING_REF }}
+          path: .ci
+
+      - uses: actions/setup-node@v4
+        if: inputs.node || inputs.bundle-artifact != ''
+        with:
+          node-version: '22'
+
+      - name: Point every app at the released bundle
+        if: inputs.bundle-url != ''
+        shell: bash
+        env:
+          PACKAGE: ${{ inputs.package }}
+          BUNDLE_URL: ${{ inputs.bundle-url }}
+          CONSUMERS: ${{ inputs.consumers }}
+        run: |
+          # CONSUMERS is a list of directories, so it is meant to split.
+          # shellcheck disable=SC2086
+          .ci/.github/scripts/point-at-bundle.sh "$BUNDLE_URL" $CONSUMERS
+
+      - name: Download the drafted bundle
+        if: inputs.bundle-artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.bundle-artifact }}
+          path: .bundle
+
+      # A background process, alive until the job ends.
+      - name: Serve the drafted bundle and point every app at it
+        if: inputs.bundle-artifact != ''
+        shell: bash
+        env:
+          PACKAGE: ${{ inputs.package }}
+          CONSUMERS: ${{ inputs.consumers }}
+        run: |
+          set -euo pipefail
+          file=$(cd .bundle && ls -- *.tar.zst)
+          nohup node .ci/.github/scripts/serve.mjs .bundle 8788 > .bundle-server.log 2>&1 &
+          for _ in $(seq 50); do
+            curl -sfI "http://127.0.0.1:8788/$file" > /dev/null && break
+            sleep 0.2
+          done
+          curl -sfI "http://127.0.0.1:8788/$file" > /dev/null || { cat .bundle-server.log; exit 1; }
+          # shellcheck disable=SC2086
+          .ci/.github/scripts/point-at-bundle.sh "http://127.0.0.1:8788/$file" $CONSUMERS
+
+      - name: Install Roc
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROC: ${{ inputs.roc }}
+        run: .ci/.github/scripts/install-roc.sh "$ROC"
+
+      - name: Set up
+        if: inputs.setup != ''
+        shell: bash
+        env:
+          SETUP: ${{ inputs.setup }}
+          ROC_OPT: ${{ matrix.opt }}
+        run: bash "$SETUP"
+
+      # Skipped for a bundle run, which is the consumer's path, and a consumer
+      # has no checkout to check. What is in this checkout was checked on the
+      # push that produced it.
+      - name: Check and test the package
+        if: inputs.bundle-url == '' && inputs.bundle-artifact == ''
+        shell: bash
+        env:
+          PACKAGE: ${{ inputs.package }}
+          ROC_OPT: ${{ matrix.opt }}
+        run: |
+          set -euo pipefail
+          roc check "$PACKAGE"
+          roc test --opt="$ROC_OPT" "$PACKAGE"
+
+      # The examples are the one part of a package that is compiled and run
+      # the way a user runs it.
+      - name: Run the examples
+        shell: bash
+        env:
+          EXAMPLES: ${{ inputs.examples }}
+          ROC_OPT: ${{ matrix.opt }}
+        run: |
+          # EXAMPLES is a list of directories, so it is meant to split.
+          # shellcheck disable=SC2086
+          .ci/.github/scripts/run-apps.sh $EXAMPLES
+
+      # Whatever else the package needs proven. Handed to roc rather than run
+      # through its shebang, since a Windows checkout carries no executable
+      # bit to run it by.
+      - name: Run ./tests.roc
+        shell: bash
+        env:
+          ROC_OPT: ${{ matrix.opt }}
+        run: |
+          set -euo pipefail
+          if [ -f ./tests.roc ]; then
+            roc --opt="$ROC_OPT" ./tests.roc
+          else
+            echo "no ./tests.roc in this repository, nothing to run"
+          fi
+
+      - name: Tear down
+        if: inputs.teardown != ''
+        shell: bash
+        env:
+          TEARDOWN: ${{ inputs.teardown }}
+          ROC_OPT: ${{ matrix.opt }}
+        run: bash "$TEARDOWN"

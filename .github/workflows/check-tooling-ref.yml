@@ -1,0 +1,40 @@
+name: Check the tooling ref
+
+# Every reusable workflow here hardcodes TOOLING_REF, the ref it checks its
+# own scripts out at, because a reusable workflow cannot see the ref it was
+# called at. This runs on every version tag and goes red if any file names a
+# version other than the tag being cut, so a forgotten bump is caught within
+# a minute, before any caller has moved to the new tag.
+#
+# On red: fix the files, then either move this tag to the fixed commit or
+# throw it away and tag the next version.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Every TOOLING_REF names ${{ github.ref_name }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          refs=$(grep -rnE '^\s+TOOLING_REF: ' .github/workflows --include='*.yml' || true)
+          if [ -z "$refs" ]; then
+            echo "::error::no workflow declares TOOLING_REF, which this guard exists to check"
+            exit 1
+          fi
+          bad=$(echo "$refs" | grep -vE "TOOLING_REF: ${GITHUB_REF_NAME}\$" || true)
+          if [ -n "$bad" ]; then
+            echo "::error::these do not name $GITHUB_REF_NAME. Bump every TOOLING_REF, then move this tag to the fixed commit or cut the next version."
+            echo "$bad"
+            exit 1
+          fi
+          echo "every TOOLING_REF names $GITHUB_REF_NAME:"
+          echo "$refs"

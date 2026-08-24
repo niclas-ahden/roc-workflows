@@ -1,0 +1,65 @@
+name: Resolve versions
+
+# Resolve what a run tests, once, so every leg of it tests the same set
+# rather than whatever happened to be newest when that leg started.
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: >
+          Also resolve this repository's latest release and the bundle on it,
+          for a run that tests what people have actually downloaded.
+        type: boolean
+        default: false
+    outputs:
+      nightly:
+        description: Tag of the newest Roc nightly.
+        value: ${{ jobs.resolve.outputs.nightly }}
+      sha:
+        description: Short commit sha of that nightly.
+        value: ${{ jobs.resolve.outputs.sha }}
+      prev_sha:
+        description: Short commit sha of the nightly before it, to name a commit range with.
+        value: ${{ jobs.resolve.outputs.prev_sha }}
+      recommended:
+        description: >
+          Nightly the latest release's notes recommend. Empty when there is no
+          release or no recommendation, and empty when it repeats `nightly`,
+          so a caller can gate that leg on non-emptiness.
+        value: ${{ jobs.resolve.outputs.recommended }}
+      release:
+        description: Tag of this repository's latest release. Empty unless `release` was set.
+        value: ${{ jobs.resolve.outputs.release }}
+      bundle:
+        description: URL of the package bundle on that release. Empty unless `release` was set.
+        value: ${{ jobs.resolve.outputs.bundle }}
+
+env:
+  # Where these workflows find their own scripts. A reusable workflow cannot
+  # see the ref it was called at, so this names it by hand: keep it equal to
+  # the tag this file is released under.
+  TOOLING_REF: v3
+
+jobs:
+  resolve:
+    name: Resolve versions
+    runs-on: ubuntu-24.04
+    outputs:
+      nightly: ${{ steps.versions.outputs.nightly }}
+      sha: ${{ steps.versions.outputs.sha }}
+      prev_sha: ${{ steps.versions.outputs.prev_sha }}
+      recommended: ${{ steps.versions.outputs.recommended }}
+      release: ${{ steps.versions.outputs.release }}
+      bundle: ${{ steps.versions.outputs.bundle }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: niclas-ahden/roc-workflows
+          ref: ${{ env.TOOLING_REF }}
+
+      - name: Resolve versions
+        id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/resolve-versions.sh ${{ inputs.release && 'release' || '' }}

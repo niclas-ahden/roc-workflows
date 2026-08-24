@@ -1,0 +1,181 @@
+name: Draft release
+
+# Bundle a tagged package, prove the tarball is whole, and put it on a DRAFT
+# release together with this version's docs and the notes a user needs. A
+# human presses Publish.
+#
+# The bundle and the docs are built by the flake's compiler: the same one the
+# release gate proved the package on, and the only claim the gate makes.
+# Which nightlies can consume the bundle is the advisory board's question,
+# answered by the suite legs that test this draft, and written into the notes
+# by the caller's `claim` job.
+#
+# Drafting before the bundle has been tested is deliberate: the drafted bundle
+# is the artifact the rest of the release run tests, so it has to exist first.
+# Nothing is public until Publish, so a run that goes red afterwards is thrown
+# away by deleting the draft.
+#
+# The caller must give this job `permissions: contents: write`, since a called
+# workflow never holds more than the job that calls it.
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: Path to the package's main module.
+        type: string
+        default: package/main.roc
+      readme:
+        description: >
+          File the release notes read the usage snippet from: the platform its
+          example runs on, and the shorthand its import uses.
+        type: string
+        default: README.md
+    outputs:
+      artifact:
+        description: Workflow artifact holding the bundle, for suite.yml's `bundle-artifact`.
+        value: ${{ jobs.draft.outputs.artifact }}
+      archive:
+        description: Filename of the bundle, which is its content hash.
+        value: ${{ jobs.draft.outputs.archive }}
+
+env:
+  # Where these workflows find their own scripts. A reusable workflow cannot
+  # see the ref it was called at, so this names it by hand: keep it equal to
+  # the tag this file is released under.
+  TOOLING_REF: v3
+
+jobs:
+  draft:
+    name: Bundle, verify and draft the release
+    runs-on: ubuntu-latest
+    outputs:
+      archive: ${{ steps.bundle.outputs.archive }}
+      artifact: bundle-${{ github.run_id }}
+    steps:
+      # The release is named after the ref, so anything but a tag would draft
+      # a release called `main`.
+      - name: Require a tag
+        run: |
+          [[ "$GITHUB_REF" == refs/tags/* ]] || {
+            echo "error: this workflow releases a tag, so run it from one (push a tag, or pick it as the ref when dispatching)" >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v14
+        with:
+          # niclas-ahden.cachix.org serves the Roc compiler this flake pins,
+          # pushed there from a dev machine, so no runner builds it from
+          # source.
+          extra-conf: |
+            extra-substituters = https://niclas-ahden.cachix.org
+            extra-trusted-public-keys = niclas-ahden.cachix.org-1:FdGli1vBk0cTuVJV27Tau/JvlbW+Ly3pRwFByyqdke0=
+            accept-flake-config = true
+
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          # Keep the saved store under GitHub's 10 GB/repo cache budget.
+          gc-max-store-size-linux: 5G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
+
+      # After the cache key is computed, so this checkout cannot change it.
+      - name: Check out the shared tooling
+        uses: actions/checkout@v4
+        with:
+          repository: niclas-ahden/roc-workflows
+          ref: ${{ env.TOOLING_REF }}
+          path: .ci
+
+      # --max-jobs 0 forbids local builds, so a compiler that is missing from
+      # the binary cache is reported here instead of quietly costing the run
+      # half an hour. The plain build after it is the fallback that keeps a
+      # stale cache from failing the run outright.
+      - name: Build Roc from the flake
+        run: |
+          nix build .#roc --max-jobs 0 || {
+            echo "::warning::The pinned Roc compiler is not in the binary cache, so this run builds it from source. Push it from a machine that has it: nix build .#roc --no-link --print-out-paths | cachix push niclas-ahden"
+            nix build .#roc
+          }
+
+      - name: Bundle the package
+        id: bundle
+        env:
+          ROC: ./result/bin/roc
+          PACKAGE: ${{ inputs.package }}
+        run: .ci/.github/scripts/bundle.sh "$PACKAGE" dist
+
+      # For the legs that test this bundle. A draft release's assets need a
+      # token and roc fetches anonymously, so the bundle travels as an
+      # artifact and each leg serves it to roc over localhost.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ github.run_id }}
+          path: dist/*.tar.zst
+          if-no-files-found: error
+          retention-days: 7
+
+      # Frozen under /<tag>/ on the docs site once the release is published.
+      - name: Generate the docs
+        env:
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+          export ROC_DOCS_URL_ROOT="/${GITHUB_REPOSITORY#*/}/$GITHUB_REF_NAME"
+          ./result/bin/roc docs "$PACKAGE"
+          tar -czf docs.tar.gz -C generated-docs .
+
+      - name: Draft the release with its assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+
+          # Reuse an existing release on a re-run, otherwise draft a new one
+          # with generated notes as the starting point for editing.
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --draft --title "$tag" --generate-notes \
+              --repo "$GITHUB_REPOSITORY"
+          fi
+
+          gh release upload "$tag" dist/*.tar.zst docs.tar.gz \
+            --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Write the compiler and usage sections
+        env:
+          GH_TOKEN: ${{ github.token }}
+          README: ${{ inputs.readme }}
+          ARCHIVE: ${{ steps.bundle.outputs.archive }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$ARCHIVE"
+          # The compatibility line starts out claiming nothing. The caller's
+          # `claim` job fills it in with the newest nightly that passed the
+          # advisory board, and the daily workflow keeps it moving afterwards.
+          .ci/.github/scripts/release-notes.sh "$GITHUB_REF_NAME" "$url"
+
+      - name: Say what is left to do
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          draft_url=$(gh release view "$GITHUB_REF_NAME" --json url -q .url --repo "$GITHUB_REPOSITORY")
+          {
+            echo "## Draft release ready"
+            echo ""
+            echo "Bundled, verified and attached: $draft_url"
+            echo ""
+            echo "Wait for the rest of this run before editing the notes or pressing Publish."
+            echo "The advisory board tests this draft the way a consumer's compiler will, and"
+            echo "the job that names a nightly in the notes may still rewrite them."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "draft ready: $draft_url"

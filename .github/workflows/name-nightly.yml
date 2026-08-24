@@ -1,0 +1,43 @@
+name: Name the nightly
+
+# Point a release's "Compatible with:" line at a Roc nightly.
+#
+# Only call this once that nightly has actually passed the suite against that
+# release. The line is a claim made to people who will install what it names.
+#
+# The caller must give this job `permissions: contents: write`, since a called
+# workflow never holds more than the job that calls it.
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: Tag of the release whose notes are rewritten.
+        type: string
+        required: true
+      nightly:
+        description: Tag of the nightly to name in them.
+        type: string
+        required: true
+
+env:
+  # Where these workflows find their own scripts. A reusable workflow cannot
+  # see the ref it was called at, so this names it by hand: keep it equal to
+  # the tag this file is released under.
+  TOOLING_REF: v3
+
+jobs:
+  name-nightly:
+    name: Name ${{ inputs.nightly }} in the ${{ inputs.release }} notes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: niclas-ahden/roc-workflows
+          ref: ${{ env.TOOLING_REF }}
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+          NIGHTLY: ${{ inputs.nightly }}
+        run: .github/scripts/name-nightly.sh "$RELEASE" "$NIGHTLY"
