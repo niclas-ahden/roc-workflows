@@ -51,7 +51,7 @@ name.
 ```roc
 app [main!] {
     pf: platform "https://github.com/niclas-ahden/basic-cli/releases/download/0.24.0/....tar.zst",
-    random: "https://github.com/niclas-ahden/joy-random/releases/download/0.1.0/<hash>.tar.zst",
+    random: "https://github.com/niclas-ahden/roc-prng/releases/download/0.1.0/<hash>.tar.zst",
 }
 ```
 
@@ -188,7 +188,7 @@ bundle and the docs afterwards. New packages should use the tag driven flow.
 
 ## Wiring up a package
 
-Four files. Replace `joy-random` with the package's name.
+Four files. Replace `roc-prng` with the package's name.
 
 ### `.github/workflows/test.yml`
 
@@ -441,7 +441,7 @@ jobs:
     uses: niclas-ahden/roc-workflows/.github/workflows/suite.yml@v3
     with:
       roc: ${{ needs.resolve.outputs.nightly }}
-      label: joy-random ${{ needs.resolve.outputs.release }} on ${{ needs.resolve.outputs.nightly }}
+      label: roc-prng ${{ needs.resolve.outputs.release }} on ${{ needs.resolve.outputs.nightly }}
       ref: ${{ needs.resolve.outputs.release }}
       bundle-url: ${{ needs.resolve.outputs.bundle }}
 
@@ -471,7 +471,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - run: |
-          echo "::error::joy-random ${{ needs.resolve.outputs.release }} fails on roc ${{ needs.resolve.outputs.nightly }}"
+          echo "::error::roc-prng ${{ needs.resolve.outputs.release }} fails on roc ${{ needs.resolve.outputs.nightly }}"
           echo "  https://github.com/roc-lang/roc/compare/${{ needs.resolve.outputs.prev_sha }}...${{ needs.resolve.outputs.sha }}"
 ```
 
