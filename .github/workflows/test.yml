@@ -3,7 +3,7 @@ name: Test
 # The package checks shared by every Roc package of ours, under the compiler
 # the repository's flake pins: roc check, roc test, the examples, a bundle
 # sanity check, and ./tests.roc if there is one. Everything built at
-# --opt=speed.
+# --opt=speed, except the `expect` blocks when the caller sets `test-opt`.
 #
 # This runs on every push, and it is the release gate: the only job a release
 # requires. suite.yml is the per operating system run on downloaded nightlies,
@@ -25,6 +25,14 @@ on:
         type: string
         required: false
         default: examples
+      test-opt:
+        description: >
+          The --opt `roc test` builds the package's `expect` blocks with. Lower
+          it only for a package whose optimized test build does not fit the
+          runner, and say why where you set it.
+        type: string
+        required: false
+        default: speed
     secrets:
       CACHIX_AUTH_TOKEN:
         required: false
@@ -137,7 +145,7 @@ jobs:
       - name: Test
         run: |
           set +e
-          ./result/bin/roc test --opt=speed "${{ inputs.package }}"
+          ./result/bin/roc test --opt="${{ inputs.test-opt }}" "${{ inputs.package }}"
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
