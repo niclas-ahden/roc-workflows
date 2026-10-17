@@ -47,6 +47,11 @@ cat "$contents"
 missing=0
 for f in "$pkg_dir"/*.roc; do
   name=$(basename "$f")
+  # Another package header next to the main module, such as one that exposes
+  # internal modules to the repository's tests, is not part of this bundle.
+  if [ "$name" != "$(basename "$main")" ] && grep -qE '^package[[:space:]]*\[' "$f"; then
+    continue
+  fi
   grep -qx "$name" "$contents" || {
     echo "::error::the bundle is missing $name"
     missing=1
